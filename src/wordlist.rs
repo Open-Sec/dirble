@@ -28,6 +28,7 @@ use encoding::{
     label::encoding_from_whatwg_label
 };
 use crate::validator_thread::TargetValidator;
+use log::error;
 
 
 // Struct for a UriGenerator, it needs the hostname, the suffix to append, a wordlist and an index into that wordlist
@@ -88,10 +89,10 @@ impl Iterator for UriGenerator {
 }
 
 // Function used to read in lines from the wordlist file
-pub fn lines_from_file(filename: String) -> Vec<String>
+pub fn lines_from_file(filename: &String) -> Vec<String>
 {
     let mut file = File::open(filename.clone())
-        .unwrap_or_else(|error| { println!("Opening file \"{}\" failed: {}", filename, error); exit(2);});
+        .unwrap_or_else(|error| { error!("Opening file \"{}\" failed: {}", filename, error); exit(2);});
     let mut reader: Vec<u8> = Vec::new();
 
     // Read the raw file in as a vector of bytes

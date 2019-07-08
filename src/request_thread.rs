@@ -25,6 +25,11 @@ use crate::arg_parse;
 use crate::request;
 use crate::wordlist;
 use crate::validator_thread;
+use log::{
+    trace,
+    debug,
+    warn,
+};
 
 pub fn thread_spawn(dir_tx: mpsc::Sender<request::RequestResponse>, 
     output_tx: mpsc::Sender<request::RequestResponse>,
@@ -32,9 +37,7 @@ pub fn thread_spawn(dir_tx: mpsc::Sender<request::RequestResponse>,
 
     let hostname = uri_gen.hostname.clone();
 
-    if global_opts.verbose {
-        println!("Scanning {}", hostname);
-    }
+    debug!("Scanning {}", hostname);
 
     let mut easy = request::generate_easy(&global_opts);
 
@@ -79,7 +82,7 @@ pub fn thread_spawn(dir_tx: mpsc::Sender<request::RequestResponse>,
             if code == 0 {
                 consecutive_errors += 1;
                 if consecutive_errors >= global_opts.max_errors {
-                    println!("Thread scanning {} stopping due to multiple consecutive errors received", hostname);
+                    warn!("Thread scanning {} stopping due to multiple consecutive errors received", hostname);
                     break;
                 }
             }
@@ -94,9 +97,7 @@ pub fn thread_spawn(dir_tx: mpsc::Sender<request::RequestResponse>,
         }
     }
 
-    if global_opts.verbose {
-        println!("Finished scanning {}", hostname);
-    }
+    debug!("Finished scanning {}", hostname);
 
     // Send a message to the main thread so it knows the thread is done
     dir_tx.send(generate_end()).unwrap();
@@ -104,10 +105,14 @@ pub fn thread_spawn(dir_tx: mpsc::Sender<request::RequestResponse>,
 
 // Sends the given RequestResponse to the main thread
 // dependent on whitelist/blacklist settings and response code
-fn send_response(dir_tx: &mpsc::Sender<request::RequestResponse>, 
+#[inline]
+fn send_response(
+    dir_tx: &mpsc::Sender<request::RequestResponse>, 
     output_tx: &mpsc::Sender<request::RequestResponse>,
-    global_opts: &arg_parse::GlobalOpts, response: request::RequestResponse,
-    validator_opt: &Option<validator_thread::TargetValidator>) {
+    global_opts: &arg_parse::GlobalOpts,
+    response: request::RequestResponse,
+    validator_opt: &Option<validator_thread::TargetValidator>
+    ) {
 
     if response.is_directory {
         dir_tx.send(response.clone()).unwrap();
@@ -115,24 +120,39 @@ fn send_response(dir_tx: &mpsc::Sender<request::RequestResponse>,
         return
     }
 
-    let contains_code = global_opts.code_list.contains(&response.code);
+    // Check each of the conditions for outputting the discovered file
 
-    if global_opts.whitelist && contains_code {
-        output_tx.send(response).unwrap();   
+    // Check the response code white/blacklist
+    let contains_code = global_opts.code_list.contains(&response.code);
+    if global_opts.whitelist && !contains_code {
+        trace!("[{}]: code {} not in whitelist",
+               response.url, response.code);
+        return;
     }
-    else if !global_opts.whitelist && !contains_code {
-        match validator_opt {
-            Some(validator) => {
-                if !validator.is_not_found(&response) {
-                    output_tx.send(response).unwrap();      
-                }
-            },
-            None => output_tx.send(response).unwrap()
+    if !global_opts.whitelist && contains_code {
+        trace!("[{}]: code {} in blacklist",
+               response.url, response.code);
+        return;
+    }
+    if let Some(validator) = validator_opt {
+        if validator.is_not_found(&response) {
+            trace!("[{}]: matches Not Found condition", response.url);
+            return;
         }
     }
+
+    // Check that the response size has not been blacklisted
+    if global_opts.length_blacklist.contains(response.content_len) {
+        trace!("[{}]: length {} is in a blacklist range",
+               response.url, response.content_len);
+        return;
+    }
+
+    // Return the response for outputting
+    output_tx.send(response).unwrap();
 }
 
-
+#[inline]
 fn generate_end() -> request::RequestResponse {
     request::RequestResponse {
         url: String::from("END"),

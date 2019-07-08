@@ -19,11 +19,11 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use crate::request::RequestResponse;
-use crate::arg_parse::GlobalOpts;
+use crate::arg_parse::{GlobalOpts, get_version_string};
 use crate::output_format;
 use std::error::Error;
 use std::io::{LineWriter, Write};
-use clap::crate_version;
+use simplelog::LevelFilter;
 
 // Struct giving access to each current file handle
 // Will be extended in future with handles for different formats
@@ -56,7 +56,7 @@ pub fn print_response(response: &RequestResponse, global_opts: Arc<GlobalOpts>,
 pub fn print_report(responses: Vec<RequestResponse>, global_opts: Arc<GlobalOpts>, file_handles: FileHandles) {
     let responses = sort_responses(responses);
 
-    if (!global_opts.silent || global_opts.verbose) && global_opts.is_terminal {
+    if global_opts.log_level >= LevelFilter::Info && global_opts.is_terminal {
         println!("\n");
     }
 
@@ -183,14 +183,19 @@ fn generate_handle(filename: &String) -> Option<LineWriter<File>>
 }
 
 // Prints out start up information
-pub fn startup_text(global_opts: Arc<GlobalOpts>) {
+pub fn startup_text(global_opts: Arc<GlobalOpts>, wordlist_file: &String) {
     if !global_opts.is_terminal { return }
 
-    println!("Dirble {}", crate_version!());
+    println!("Dirble {}", get_version_string());
     println!("Developed by Izzy Whistlecroft\n");
 
     println!("Targets: {}", global_opts.hostnames.clone().join(" "));
-    println!("Wordlists: {}", global_opts.wordlist_files.clone().join(" "));
+    if let Some(globalopts_wordlists) = global_opts.wordlist_files.clone() {
+        println!("Wordlists: {}", globalopts_wordlists.join(" "));
+    }
+    else {
+        println!("Wordlist: {}", wordlist_file);
+    }
 
     if global_opts.prefixes.len() == 1 && global_opts.prefixes[0] == "" {
         println!("No Prefixes");
@@ -204,6 +209,13 @@ pub fn startup_text(global_opts: Arc<GlobalOpts>) {
     }
     else {
         println!("Extensions: {}", global_opts.extensions.clone()[1..].join(" "));
+    }
+
+    if global_opts.length_blacklist.is_empty() {
+        println!("No lengths hidden");
+    }
+    else {
+        println!("Hidden lengths: {}", global_opts.length_blacklist);
     }
     println!("");
 }

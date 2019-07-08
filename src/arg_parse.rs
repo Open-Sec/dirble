@@ -15,15 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with Dirble.  If not, see <https://www.gnu.org/licenses/>.
 extern crate clap;
-use std::process::exit;
-use std::env::current_exe;
+use std::{
+    fmt,
+    process::exit,
+};
 use clap::{App, Arg, AppSettings, ArgGroup, crate_version};
 use crate::wordlist::lines_from_file;
 use atty::Stream;
+use simplelog::LevelFilter;
 
 pub struct GlobalOpts {
     pub hostnames: Vec<String>,
-    pub wordlist_files: Vec<String>,
+    pub wordlist_files: Option<Vec<String>>,
     pub prefixes: Vec<String>,
     pub extensions: Vec<String>,
     pub max_threads: u32,
@@ -40,8 +43,6 @@ pub struct GlobalOpts {
     pub output_file: Option<String>,
     pub json_file: Option<String>,
     pub xml_file: Option<String>,
-    pub verbose: bool,
-    pub silent: bool,
     pub timeout: u32,
     pub max_errors: u32,
     pub wordlist_split: u32,
@@ -55,7 +56,73 @@ pub struct GlobalOpts {
     pub no_color:bool,
     pub disable_validator:bool,
     pub http_verb:HttpVerb,
-    pub scan_opts: ScanOpts
+    pub scan_opts: ScanOpts,
+    pub log_level: LevelFilter,
+    pub length_blacklist: LengthRanges,
+}
+
+#[derive(PartialOrd, Ord, PartialEq, Eq, Clone)]
+pub struct LengthRange {
+    pub start: usize,
+    pub end: Option<usize>,
+}
+
+impl LengthRange {
+    pub fn contains(&self, test: usize) -> bool {
+        if let Some(end) = self.end {
+            return self.start <= test && test <= end;
+        } else {
+            return test == self.start;
+        }
+    }
+}
+
+impl fmt::Debug for LengthRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let output: String;
+        if let Some(end) = self.end {
+            output = format!("{}-{}", self.start, end);
+        }
+        else{
+            output = format!("{}", self.start);
+        }
+        write!(f, "{}", output)
+    }
+}
+
+pub struct LengthRanges {
+    pub ranges: Vec<LengthRange>,
+}
+
+impl LengthRanges {
+    pub fn contains(&self, test: usize) -> bool {
+        for range in &self.ranges {
+            if range.contains(test) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+impl Default for LengthRanges {
+    fn default() -> Self {
+        Self {
+            ranges: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for LengthRanges {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ranges = self.ranges.clone();
+        ranges.sort();
+        write!(f, "{:?}", ranges)
+    }
 }
 
 pub struct ScanOpts {
@@ -73,9 +140,13 @@ arg_enum!{
 
 pub fn get_args() -> GlobalOpts
 {
+    // For general compilation, include the current commit hash and
+    // build date in the version string. When building releases via the
+    // Makefile, only use the release number.
+    let version_string = get_version_string();
     // Defines all the command line arguments with the Clap module
     let args = App::new("Dirble")
-        .version(crate_version!())
+        .version(version_string)
         .author("Developed by Izzy Whistlecroft <Izzy(dot)Whistlecroft(at)nccgroup(dot).com>")
         .about("Fast directory scanning and scraping tool")
         .after_help("OUTPUT FORMAT:
@@ -364,16 +435,18 @@ no value must end in a semicolon")
         .arg(Arg::with_name("verbose")
              .display_order(100)
              .help(
-"Print information when a thread starts and finishes scanning")
+"Increase the verbosity level. Use twice for full verbosity.")
              .long("verbose")
+             .multiple(true)
              .next_line_help(true)
              .short("v")
-             .takes_value(false))
+             .takes_value(false)
+             .conflicts_with("silent"))
         .arg(Arg::with_name("silent")
              .display_order(100)
              .help(
 "Don't output information during the scan, only output the report at
-the end")
+the end.")
              .long("silent")
              .next_line_help(true)
              .short("S")
@@ -451,6 +524,15 @@ set to 0 to disable")
              .help("Disable coloring of terminal output")
              .long("no-color")
              .next_line_help(true))
+        .arg(Arg::with_name("length_blacklist")
+             .help(
+"Specify length ranges to hide, e.g. --hide-lengths 348,500-700")
+             .long("hide-lengths")
+             .min_values(1)
+             .multiple(true)
+             .next_line_help(true)
+             .takes_value(true)
+             .value_delimiter(","))
         .get_matches();
 
     
@@ -463,7 +545,7 @@ set to 0 to disable")
     }
     if args.is_present("host_file") {
         for host_file in args.values_of("host_file").unwrap() {
-            let hosts = lines_from_file(String::from(host_file));
+            let hosts = lines_from_file(&String::from(host_file));
             for hostname in hosts {
                 if hostname.starts_with("https://") || hostname.starts_with("http://") { 
                     hostnames.push(String::from(hostname));
@@ -489,19 +571,19 @@ set to 0 to disable")
     hostnames.dedup();
 
     // Parse wordlist file names into a vector
-    let mut wordlists:Vec<String> = Vec::new();
+    let wordlists:Option<Vec<String>>;
 
     if args.is_present("wordlist") {
+        let mut wordlists_vec = Vec::new();
         for wordlist_file in args.values_of("wordlist").unwrap() {
-            wordlists.push(String::from(wordlist_file));
+            wordlists_vec.push(String::from(wordlist_file));
         }
+        wordlists = Some(wordlists_vec);
     }
     else {
-        let mut exe_path = current_exe()
-            .unwrap_or_else(|error| { println!("Getting directory of exe failed: {}", error); exit(2);});
-        exe_path.set_file_name("dirble_wordlist.txt");
-        wordlists.push(String::from(exe_path.to_str().unwrap()));
+        wordlists = None;
     }
+
 
 
     // Check for proxy related flags
@@ -584,6 +666,18 @@ set to 0 to disable")
         scan_opts.scan_403 = true;
     }
 
+    // Configure the logging level. The silent flag overrides any
+    // verbose flags in use.
+    let log_level = if args.is_present("silent") {
+        LevelFilter::Warn
+    } else {
+        match args.occurrences_of("verbose") {
+            0 => LevelFilter::Info,
+            1 => LevelFilter::Debug,
+            2 | _ => LevelFilter::Trace,
+        }
+    };
+
     // Create the GlobalOpts struct and return it
     GlobalOpts {
         hostnames,
@@ -619,8 +713,6 @@ set to 0 to disable")
         output_file: filename_from_args(&args, "txt"),
         json_file: filename_from_args(&args, "json"),
         xml_file: filename_from_args(&args, "xml"),
-        verbose: args.is_present("verbose"),
-        silent: args.is_present("silent"),
         timeout: args.value_of("timeout").unwrap().parse::<u32>().unwrap(),
         max_errors:
             args.value_of("max_errors").unwrap().parse::<u32>().unwrap(),
@@ -636,7 +728,11 @@ set to 0 to disable")
         no_color: args.is_present("no_color"),
         disable_validator: args.is_present("disable_validator"),
         http_verb: value_t!(args.value_of("http_verb"), HttpVerb).unwrap(),
-        scan_opts
+        scan_opts,
+        log_level,
+        length_blacklist: if args.is_present("length_blacklist") {
+            length_blacklist_parse(args.values_of("length_blacklist").unwrap())
+        } else { Default::default() },
     }
 }
 
@@ -704,7 +800,7 @@ fn load_modifiers(args: &clap::ArgMatches, mod_type: &str)
         }
         if args.is_present(&file_arg) {
             for filename in args.values_of(file_arg).unwrap() {
-                for modifier in lines_from_file(String::from(filename)) {
+                for modifier in lines_from_file(&String::from(filename)) {
                     modifiers.push(String::from(modifier));
                 }
             }
@@ -714,6 +810,22 @@ fn load_modifiers(args: &clap::ArgMatches, mod_type: &str)
         modifiers.dedup();
 
         modifiers
+}
+
+#[inline]
+pub fn get_version_string() -> &'static str {
+    if cfg!(feature = "release_version_string") {
+        return crate_version!()
+    }
+    else {
+        return concat!(
+            env!("VERGEN_SEMVER"),
+            " (commit ",
+            env!("VERGEN_SHA_SHORT"),
+            ", build ",
+            env!("VERGEN_BUILD_DATE"),
+            ")")
+    }
 }
 
 // Validator for the provided host name, ensures that the value begins with http:// or https://
@@ -752,4 +864,34 @@ fn int_check(value: String) -> Result<(), String> {
         Err(_) => {},
     };
     return Err(String::from("The number given must be an integer."))
+}
+
+fn length_blacklist_parse(blacklist_inputs: clap::Values) -> LengthRanges {
+    let mut length_vector: Vec<LengthRange> = Vec::with_capacity(
+        blacklist_inputs.len());
+
+    for length in blacklist_inputs {
+        let start;
+        let end;
+
+        if length.contains("-") {
+            let components: Vec<&str> = length.split("-").collect();
+            assert!(components.len() == 2,
+                "Ranges must be in the form `150-300`");
+            start = components[0].parse::<usize>().unwrap();
+            end = Some(components[1].parse::<usize>().expect(
+                "Ranges must be in the form `150-300`"));
+            assert!(start < end.unwrap(),
+                "The start of a range must be smaller than the end");
+        } else {
+            // Length is just one number
+            start = length.parse::<usize>().unwrap();
+            end = None;
+        }
+        length_vector.push(
+            LengthRange { start, end });
+    }
+    LengthRanges{
+        ranges: length_vector,
+    }
 }
